@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 import sqlite3
+import platform
+import subprocess
 
 import numpy as np
 import pandas as pd
@@ -138,6 +140,17 @@ def main():
     plt.close(fig)
 
     print("[OK] Saved:", outpath.resolve())
+
+    # Open the output file
+    try:
+        if platform.system() == "Windows":
+            os.startfile(str(outpath))
+        elif platform.system() == "Darwin":  # macOS
+            subprocess.run(["open", str(outpath)])
+        else:  # Linux
+            subprocess.run(["xdg-open", str(outpath)])
+    except Exception as e:
+        print(f"[WARN] Could not open file: {e}")
 
 
 if __name__ == "__main__":
