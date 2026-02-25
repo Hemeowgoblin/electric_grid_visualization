@@ -3,9 +3,16 @@ from pathlib import Path
 import sqlite3
 import platform
 import subprocess
+import time
+import psutil
+import ctypes
+import ctypes.wintypes as wintypes
+import uuid
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 
 
@@ -16,6 +23,20 @@ INCH_PER_MM = 1 / 25.4
 
 CRITICAL_HOUR_DEMAND = 12
 PLOT_LINES = True  # Now enabled (black lines)
+
+# ---------- Circle Settings ----------
+PLOT_CIRCLES = True  # Toggle circle points on/off (master toggle)
+
+# Circle fill (inside)
+PLOT_CIRCLE_FILL = True  # Toggle circle fill color on/off. When True, circles are colored by HC values using CIRCLE_CMAP. When False, circles appear in a plain gray color.
+CIRCLE_SIZE = 6  # Size of circles in points. Larger values make circles more visible. Typical range: 5-20.
+CIRCLE_CMAP = "RdYlGn"  # Color map for circle fill. "RdYlGn" maps red (low HC) → yellow (medium) → green (high HC). Other options: "viridis", "plasma", "cool", "hot". Only used if PLOT_CIRCLE_FILL is True.
+CIRCLE_ALPHA = 0.7  # Transparency of circle fill. Range: 0 (invisible) to 1 (fully opaque). Lower values make overlapping circles more visible.
+
+# Circle border (outline)
+PLOT_CIRCLE_EDGE = True  # Toggle circle border/outline on/off. When True, circles have a visible edge. When False, circles have no outline.
+CIRCLE_EDGE_COLOR = "black"  # Color of the circle outline. Use any matplotlib color name (e.g., "black", "white", "red") or hex code (e.g., "#000000").
+CIRCLE_EDGE_WIDTH = 0.5  # Thickness of the circle outline in points. Range: 0 (no outline) to ~2+ (thick outline). Typical range: 0.1-1.0.
 
 
 def read_capmap(cap_path: Path) -> pd.DataFrame:
@@ -55,11 +76,150 @@ def line_segments(bus: pd.DataFrame, line: pd.DataFrame) -> pd.DataFrame:
     return seg[["X1", "Y1", "X2", "Y2"]]
 
 
+def _find_window_pids_with_title(substring: str):
+    """Return list of PIDs for visible top-level windows whose title contains substring (case-insensitive)."""
+    user32 = ctypes.windll.user32
+    substring_l = substring.lower()
+    pids = set()
+
+    CALLBACK = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    @CALLBACK
+    def _enum_proc(hwnd, lparam):
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value
+            if substring_l in title.lower():
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                pids.add(pid.value)
+        except Exception:
+            pass
+        return True
+
+    try:
+        user32.EnumWindows(_enum_proc, 0)
+    except Exception:
+        pass
+
+    return list(pids)
+
+
+def close_file_viewers_windows(file_path: Path):
+    """
+    Detect windows showing the file (by window title), attempt to terminate those processes,
+    and report detected/closed/remaining counts.
+    """
+    try:
+        target_name = file_path.name
+        print("\n[STEP 1] Detecting open instances by window title...")
+        detected_pids = _find_window_pids_with_title(target_name)
+        detected = []
+        for pid in detected_pids:
+            try:
+                name = psutil.Process(pid).name()
+            except Exception:
+                name = "<unknown>"
+            detected.append((pid, name))
+
+        print(f"[DETECTED] {len(detected)} open instance(s) found")
+        for pid, name in detected:
+            print(f"  - PID {pid}: {name}")
+
+        # Step 2: close processes
+        print(f"\n[STEP 2] Closing {len(detected)} instance(s)...")
+        closed = 0
+        for pid, name in detected:
+            try:
+                proc = psutil.Process(pid)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                    closed += 1
+                    print(f"  ✓ Terminated PID {pid} ({name})")
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                    closed += 1
+                    print(f"  ✓ Force killed PID {pid} ({name})")
+            except Exception as e:
+                print(f"  ✗ Failed to close PID {pid}: {e}")
+
+        print(f"[CLOSED] {closed}/{len(detected)} instance(s) closed")
+
+        # Step 3: verify remaining
+        print(f"\n[STEP 3] Verifying remaining open instances...")
+        time.sleep(1)
+        remaining_pids = _find_window_pids_with_title(target_name)
+        remaining = []
+        for pid in remaining_pids:
+            try:
+                name = psutil.Process(pid).name()
+            except Exception:
+                name = "<unknown>"
+            remaining.append((pid, name))
+
+        print(f"[REMAINING] {len(remaining)} open instance(s) still detected")
+        for pid, name in remaining:
+            print(f"  - PID {pid}: {name}")
+        if not remaining:
+            print("  ✓ File successfully released (no windows with filename in title detected)")
+        else:
+            print("  ! Some windows still display the file; close them manually if needed")
+
+    except Exception as e:
+        print(f"[WARN] Error during window-title based closing: {e}")
+        # fallback: best-effort psutil open_files scan (may miss UWP viewers)
+        try:
+            print("[INFO] Falling back to psutil.open_files scan...")
+            file_path_str = str(file_path).lower()
+            open_processes = []
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    for of in proc.open_files():
+                        if file_path_str == of.path.lower():
+                            open_processes.append((proc.pid, proc.name(), proc))
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            print(f"[DETECTED-PSUTIL] {len(open_processes)} instance(s) found")
+            closed2 = 0
+            for pid, name, proc in open_processes:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                    closed2 += 1
+                except Exception:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                        closed2 += 1
+                    except Exception:
+                        pass
+            print(f"[CLOSED-PSUTIL] {closed2}/{len(open_processes)} instance(s) closed")
+        except Exception as e2:
+            print(f"[WARN] psutil fallback failed: {e2}")
+
+
 def main():
     wd = Path(os.getcwd())
     root = wd / "pola_results"
     outdir = wd / "ch4_figures_all"
     outdir.mkdir(parents=True, exist_ok=True)
+
+    outpath_template = f"map_demand_global_hour{CRITICAL_HOUR_DEMAND:02d}_175x132mm.png"
+    outpath_full = outdir / outpath_template
+
+    # Close file viewers BEFORE creating new file (Windows-specific)
+    if platform.system() == "Windows":
+        close_file_viewers_windows(outpath_full)
+    else:
+        print("[INFO] File closing only implemented for Windows")
 
     pts_all = []
     seg_all = []
@@ -114,16 +274,31 @@ def main():
                 alpha=1.0
             )
 
-    sc = ax.scatter(
-        pts["X"],
-        pts["Y"],
-        c=pts["HC"],
-        s=6,
-        cmap="viridis"
-    )
+    if PLOT_CIRCLES:
+        # Determine edge properties based on toggle
+        edge_color = CIRCLE_EDGE_COLOR if PLOT_CIRCLE_EDGE else "none"
+        edge_width = CIRCLE_EDGE_WIDTH if PLOT_CIRCLE_EDGE else 0
 
-    cb = plt.colorbar(sc, ax=ax, fraction=0.035, pad=0.02)
-    cb.set_label("Demand hosting capacity [kW] (min across phases)")
+        # Determine color scaling: vmin = minimum HC value (maps to red), vmax = maximum HC value (maps to green)
+        hc_min = pts["HC"].min()
+        hc_max = pts["HC"].max()
+
+        sc = ax.scatter(
+            pts["X"],
+            pts["Y"],
+            c=pts["HC"] if PLOT_CIRCLE_FILL else "lightgray",
+            s=CIRCLE_SIZE,
+            cmap=CIRCLE_CMAP if PLOT_CIRCLE_FILL else None,
+            alpha=CIRCLE_ALPHA if PLOT_CIRCLE_FILL else 0.3,
+            edgecolors=edge_color,
+            linewidth=edge_width,
+            vmin=hc_min if PLOT_CIRCLE_FILL else None,
+            vmax=hc_max if PLOT_CIRCLE_FILL else None
+        )
+
+        if PLOT_CIRCLE_FILL:
+            cb = plt.colorbar(sc, ax=ax, fraction=0.035, pad=0.02)
+            cb.set_label("Demand hosting capacity [kW] (min across phases)")
 
     ax.set_title(
         f"Demand nodal hosting capacity at critical hour (t={CRITICAL_HOUR_DEMAND:02d})"
@@ -138,10 +313,12 @@ def main():
     outpath = outdir / f"map_demand_global_hour{CRITICAL_HOUR_DEMAND:02d}_175x132mm.png"
     fig.savefig(outpath)
     plt.close(fig)
+    plt.close('all')  # Ensure all figures are closed
 
     print("[OK] Saved:", outpath.resolve())
 
-    # Open the output file
+    # Open the output file with a delay to ensure file is fully written
+    time.sleep(0.5)
     try:
         if platform.system() == "Windows":
             os.startfile(str(outpath))
