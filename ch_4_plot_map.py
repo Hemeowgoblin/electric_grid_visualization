@@ -3,9 +3,12 @@ from pathlib import Path
 import sqlite3
 import platform
 import subprocess
+import time
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 
 
@@ -16,6 +19,20 @@ INCH_PER_MM = 1 / 25.4
 
 CRITICAL_HOUR_DEMAND = 12
 PLOT_LINES = True  # Now enabled (black lines)
+
+# ---------- Circle Settings ----------
+PLOT_CIRCLES = True  # Toggle circle points on/off (master toggle)
+
+# Circle fill (inside)
+PLOT_CIRCLE_FILL = True  # Toggle circle fill color on/off. When True, circles are colored by HC values using CIRCLE_CMAP. When False, circles appear in a plain gray color.
+CIRCLE_SIZE = 6  # Size of circles in points. Larger values make circles more visible. Typical range: 5-20.
+CIRCLE_CMAP = "RdYlGn"  # Color map for circle fill. "RdYlGn" maps red (low HC) → yellow (medium) → green (high HC). Other options: "viridis", "plasma", "cool", "hot". Only used if PLOT_CIRCLE_FILL is True.
+CIRCLE_ALPHA = 0.7  # Transparency of circle fill. Range: 0 (invisible) to 1 (fully opaque). Lower values make overlapping circles more visible.
+
+# Circle border (outline)
+PLOT_CIRCLE_EDGE = True  # Toggle circle border/outline on/off. When True, circles have a visible edge. When False, circles have no outline.
+CIRCLE_EDGE_COLOR = "black"  # Color of the circle outline. Use any matplotlib color name (e.g., "black", "white", "red") or hex code (e.g., "#000000").
+CIRCLE_EDGE_WIDTH = 0.5  # Thickness of the circle outline in points. Range: 0 (no outline) to ~2+ (thick outline). Typical range: 0.1-1.0.
 
 
 def read_capmap(cap_path: Path) -> pd.DataFrame:
@@ -114,16 +131,31 @@ def main():
                 alpha=1.0
             )
 
-    sc = ax.scatter(
-        pts["X"],
-        pts["Y"],
-        c=pts["HC"],
-        s=6,
-        cmap="viridis"
-    )
+    if PLOT_CIRCLES:
+        # Determine edge properties based on toggle
+        edge_color = CIRCLE_EDGE_COLOR if PLOT_CIRCLE_EDGE else "none"
+        edge_width = CIRCLE_EDGE_WIDTH if PLOT_CIRCLE_EDGE else 0
 
-    cb = plt.colorbar(sc, ax=ax, fraction=0.035, pad=0.02)
-    cb.set_label("Demand hosting capacity [kW] (min across phases)")
+        # Determine color scaling: vmin = minimum HC value (maps to red), vmax = maximum HC value (maps to green)
+        hc_min = pts["HC"].min()
+        hc_max = pts["HC"].max()
+
+        sc = ax.scatter(
+            pts["X"],
+            pts["Y"],
+            c=pts["HC"] if PLOT_CIRCLE_FILL else "lightgray",
+            s=CIRCLE_SIZE,
+            cmap=CIRCLE_CMAP if PLOT_CIRCLE_FILL else None,
+            alpha=CIRCLE_ALPHA if PLOT_CIRCLE_FILL else 0.3,
+            edgecolors=edge_color,
+            linewidth=edge_width,
+            vmin=hc_min if PLOT_CIRCLE_FILL else None,
+            vmax=hc_max if PLOT_CIRCLE_FILL else None
+        )
+
+        if PLOT_CIRCLE_FILL:
+            cb = plt.colorbar(sc, ax=ax, fraction=0.035, pad=0.02)
+            cb.set_label("Demand hosting capacity [kW] (min across phases)")
 
     ax.set_title(
         f"Demand nodal hosting capacity at critical hour (t={CRITICAL_HOUR_DEMAND:02d})"
@@ -138,10 +170,12 @@ def main():
     outpath = outdir / f"map_demand_global_hour{CRITICAL_HOUR_DEMAND:02d}_175x132mm.png"
     fig.savefig(outpath)
     plt.close(fig)
+    plt.close('all')  # Ensure all figures are closed
 
     print("[OK] Saved:", outpath.resolve())
 
-    # Open the output file
+    # Open the output file with a delay to ensure file is fully written
+    time.sleep(0.5)
     try:
         if platform.system() == "Windows":
             os.startfile(str(outpath))
