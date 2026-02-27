@@ -51,6 +51,11 @@ PLOT_CIRCLE_EDGE = True  # Toggle circle border/outline on/off. When True, circl
 CIRCLE_EDGE_COLOR = "black"  # Color of the circle outline. Use any matplotlib color name (e.g., "black", "white", "red") or hex code (e.g., "#000000").
 CIRCLE_EDGE_WIDTH = 0.5  # Thickness of the circle outline in points. Range: 0 (no outline) to ~2+ (thick outline). Typical range: 0.1-1.0.
 
+# ---------- Output Settings ----------
+SAVE_HIGH_RES = True   # Save additional high-resolution PNG version
+HIGH_RES_DPI = 300    # DPI for high-resolution version (default is ~100)
+SAVE_SVG = True       # Save vector SVG version
+
 
 def read_capmap(cap_path: Path) -> pd.DataFrame:
     df = pd.read_csv(cap_path, skipinitialspace=True)
@@ -378,10 +383,19 @@ def main():
 
     outpath = outdir / f"map_demand_global_hour{CRITICAL_HOUR_DEMAND:02d}_175x132mm.png"
     fig.savefig(outpath)
-    plt.close(fig)
-    plt.close('all')  # Ensure all figures are closed
-
     print("[OK] Saved:", outpath.resolve())
+
+    if SAVE_HIGH_RES:
+        outpath_hires = outdir / f"map_demand_global_hour{CRITICAL_HOUR_DEMAND:02d}_175x132mm_high_resolution.png"
+        fig.savefig(outpath_hires, dpi=HIGH_RES_DPI)
+        print("[OK] Saved high-res:", outpath_hires.resolve())
+
+    if SAVE_SVG:
+        outpath_svg = outdir / f"map_demand_global_hour{CRITICAL_HOUR_DEMAND:02d}_175x132mm_vector.svg"
+        fig.savefig(outpath_svg, format="svg")
+        print("[OK] Saved SVG:", outpath_svg.resolve())
+
+    plt.close(fig)
 
     # Open the output file with a delay to ensure file is fully written
     time.sleep(0.5)
