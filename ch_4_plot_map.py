@@ -22,10 +22,16 @@ OUT_H_MM = 132   # height in mm
 INCH_PER_MM = 1 / 25.4
 
 CRITICAL_HOUR_DEMAND = 12
+
+# ---------- Line Settings ----------
 PLOT_LINES = True  # Now enabled (black lines)
 
+LINE_WIDTH = 0.3  # Width of the line in points. Range: 0 (no line) to ~2+ (thick line). Typical range: 0.1-1.0.
+LINE_ALPHA = 1.0  # Transparency of the line. Range: 0 (invisible) to 1 (fully opaque).
+LINE_COLOR = "black"  # Color of the line. Use any matplotlib color name (e.g., "black", "white", "red") or hex code (e.g., "#000000").
+
 # ---------- Circle Settings ----------
-PLOT_CIRCLES = True  # Toggle circle points on/off (master toggle)
+PLOT_CIRCLES = False  # Toggle circle points on/off (master toggle)
 
 # Circle fill (inside)
 PLOT_CIRCLE_FILL = True  # Toggle circle fill color on/off. When True, circles are colored by HC values using CIRCLE_CMAP. When False, circles appear in a plain gray color.
@@ -269,9 +275,9 @@ def main():
             ax.plot(
                 [r["X1"], r["X2"]],
                 [r["Y1"], r["Y2"]],
-                linewidth=0.3,
-                color="black",
-                alpha=1.0
+                linewidth=LINE_WIDTH,
+                color=LINE_COLOR,
+                alpha=LINE_ALPHA
             )
 
     if PLOT_CIRCLES:
