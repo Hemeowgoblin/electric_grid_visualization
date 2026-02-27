@@ -30,8 +30,15 @@ LINE_WIDTH = 0.3  # Width of the line in points. Range: 0 (no line) to ~2+ (thic
 LINE_ALPHA = 1.0  # Transparency of the line. Range: 0 (invisible) to 1 (fully opaque).
 LINE_COLOR = "black"  # Color of the line. Use any matplotlib color name (e.g., "black", "white", "red") or hex code (e.g., "#000000").
 
+# ---------- Proper Line (Line Segments) with Segments Settings ----------
+PLOT_PROPER_LINES = True  # Toggle proper segment-based lines on/off
+
+PROPER_LINE_WIDTH = 0.3   # Width of proper lines
+PROPER_LINE_ALPHA = 1.0   # Transparency of proper lines
+PROPER_LINE_COLOR = "blue"  # Color of proper lines (blue to distinguish from black direct lines)
+
 # ---------- Circle Settings ----------
-PLOT_CIRCLES = False  # Toggle circle points on/off (master toggle)
+PLOT_CIRCLES = True  # Toggle circle points on/off (master toggle)
 
 # Circle fill (inside)
 PLOT_CIRCLE_FILL = True  # Toggle circle fill color on/off. When True, circles are colored by HC values using CIRCLE_CMAP. When False, circles appear in a plain gray color.
@@ -80,6 +87,41 @@ def line_segments(bus: pd.DataFrame, line: pd.DataFrame) -> pd.DataFrame:
     b2 = bus[["BusId", "X", "Y"]].rename(columns={"BusId": "Bus2", "X": "X2", "Y": "Y2"})
     seg = line.merge(b1, on="Bus1", how="left").merge(b2, on="Bus2", how="left")
     return seg[["X1", "Y1", "X2", "Y2"]]
+
+
+def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path) -> pd.DataFrame:
+    if line.empty:
+        return pd.DataFrame()
+    
+    con = sqlite3.connect(db_path)
+    seg = pd.read_sql_query("SELECT Line, ID, X, Y FROM Seg ORDER BY Line, ID", con)
+    con.close()
+    
+    if seg.empty:
+        return pd.DataFrame()
+    
+    bus = bus.rename(columns={"ID": "BusId"})
+    bus_xy = bus.set_index("BusId")[["X", "Y"]].to_dict("index")
+    
+    results = []
+    for _, row in line.iterrows():
+        bus1, bus2 = row.get("Bus1"), row.get("Bus2")
+        seg1, seg2 = row.get("Seg1"), row.get("Seg2")
+        
+        if pd.notna(seg1) and pd.notna(seg2):
+            mask = (seg["Line"] == row["ID"]) & (seg["ID"] >= seg1) & (seg["ID"] <= seg2)
+            pts = seg.loc[mask, ["X", "Y"]].values.tolist()
+        else:
+            pts = []
+            if bus1 in bus_xy:
+                pts.append([bus_xy[bus1]["X"], bus_xy[bus1]["Y"]])
+            if bus2 in bus_xy:
+                pts.append([bus_xy[bus2]["X"], bus_xy[bus2]["Y"]])
+        
+        if len(pts) >= 2:
+            results.append({"X": [p[0] for p in pts], "Y": [p[1] for p in pts]})
+    
+    return pd.DataFrame(results)
 
 
 def _find_window_pids_with_title(substring: str):
@@ -229,6 +271,7 @@ def main():
 
     pts_all = []
     seg_all = []
+    proper_seg_all = []
 
     station_dirs = sorted([p for p in root.iterdir() if p.is_dir()])
 
@@ -260,8 +303,14 @@ def main():
             if not seg.empty:
                 seg_all.append(seg)
 
+        if PLOT_PROPER_LINES:
+            proper_seg = proper_line_segments(bus, line, db_path)
+            if not proper_seg.empty:
+                proper_seg_all.append(proper_seg)
+
     pts = pd.concat(pts_all, ignore_index=True).dropna(subset=["X", "Y", "HC"])
     seg = pd.concat(seg_all, ignore_index=True) if seg_all else pd.DataFrame()
+    proper_seg = pd.concat(proper_seg_all, ignore_index=True) if proper_seg_all else pd.DataFrame()
 
     # --------- Plot ---------
     fig_w_in = OUT_W_MM * INCH_PER_MM
@@ -278,6 +327,17 @@ def main():
                 linewidth=LINE_WIDTH,
                 color=LINE_COLOR,
                 alpha=LINE_ALPHA
+            )
+
+    if PLOT_PROPER_LINES and not proper_seg.empty:
+        proper_seg = proper_seg.dropna()
+        for _, r in proper_seg.iterrows():
+            ax.plot(
+                r["X"],
+                r["Y"],
+                linewidth=PROPER_LINE_WIDTH,
+                color=PROPER_LINE_COLOR,
+                alpha=PROPER_LINE_ALPHA
             )
 
     if PLOT_CIRCLES:
