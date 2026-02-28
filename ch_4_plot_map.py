@@ -15,6 +15,9 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman']
+
 
 # ---------- Settings ----------
 OUT_W_MM = 175   # width in mm
@@ -30,6 +33,7 @@ LINE_WIDTH = 0.6  # Width of the line in points. Range: 0 (no line) to ~2+ (thic
 LINE_ALPHA = 0.8  # Transparency of the line. Range: 0 (invisible) to 1 (fully opaque).
 LINE_COLOR = "black"  # Color of the line. Use any matplotlib color name (e.g., "black", "white", "red") or hex code (e.g., "#000000").
 LINE_DYNAMIC_COLOR = True  # If True, color lines by average HC of connected buses (overrides LINE_COLOR)
+LINE_DYNAMIC_COLOR_OPTION = 1  # 1=use average HC, 2=use minimum HC
 LINE_GROUP_CONNECTIVITY = True  # If True, use connected line groups for color (all lines in a connected group share the same color)
 LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS = False  # If True, include switches and transformers when determining connected line groups
 
@@ -39,7 +43,8 @@ PLOT_PROPER_LINES = True  # Toggle proper segment-based lines on/off
 PROPER_LINE_WIDTH = 0.6   # Width of proper lines
 PROPER_LINE_ALPHA = 0.8   # Transparency of proper lines
 PROPER_LINE_COLOR = "blue"  # Color of proper lines (blue to distinguish from black direct lines)
-PROPER_LINE_DYNAMIC_COLOR = True  # If True, color lines by average HC of connected buses (overrides PROPER_LINE_COLOR)
+PROPER_LINE_DYNAMIC_COLOR = True  # If True, color lines by the HC of connected buses (overrides PROPER_LINE_COLOR)
+PROPER_LINE_DYNAMIC_COLOR_OPTION = 2  # 1=use average HC, 2=use minimum HC
 PROPER_LINE_GROUP_CONNECTIVITY = True  # If True, use connected line groups for color (all lines in a connected group share the same color)
 PROPER_LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS = True  # If True, include switches and transformers when determining connected line groups
 
@@ -58,7 +63,7 @@ CIRCLE_EDGE_COLOR = "black"  # Color of the circle outline. Use any matplotlib c
 CIRCLE_EDGE_WIDTH = 0.5  # Thickness of the circle outline in points. Range: 0 (no outline) to ~2+ (thick outline). Typical range: 0.1-1.0.
 
 # ---------- Background Settings ----------
-BACKGROUND_COLOR = "gray"  # Background color of the plot. Use any matplotlib color name or hex code. "lightgray" provides good contrast for both dark and light elements.
+BACKGROUND_COLOR = "white"  # Background color of the plot. Use any matplotlib color name or hex code. "lightgray" provides good contrast for both dark and light elements.
 
 # ---------- Output Settings ----------
 SAVE_HIGH_RES = True   # Save additional high-resolution PNG version
@@ -107,10 +112,12 @@ def line_segments(bus: pd.DataFrame, line: pd.DataFrame, hc_data: pd.DataFrame =
     if hc_data is not None and not hc_data.empty:
         hc_lookup = hc_data.set_index("BusId")["HC"].to_dict()
     
-    group_hc_lookup = {}
+    group_avg_hc_lookup = {}
+    group_min_hc_lookup = {}
     line_to_group = {}
     if group_hc_df is not None and not group_hc_df.empty and line_group_df is not None and not line_group_df.empty:
-        group_hc_lookup = group_hc_df.set_index("GroupID")["AvgHC"].to_dict()
+        group_avg_hc_lookup = group_hc_df.set_index("GroupID")["AvgHC"].to_dict()
+        group_min_hc_lookup = group_hc_df.set_index("GroupID")["MinHC"].to_dict()
         line_to_group = line_group_df.set_index("LineID")["GroupID"].to_dict()
     
     results = []
@@ -120,26 +127,34 @@ def line_segments(bus: pd.DataFrame, line: pd.DataFrame, hc_data: pd.DataFrame =
         x1, y1 = row.get("X1"), row.get("Y1")
         x2, y2 = row.get("X2"), row.get("Y2")
         
-        avg_hc = None
+        hc_value = None
         
-        if group_hc_lookup and line_id in line_to_group:
+        if group_avg_hc_lookup and line_id in line_to_group:
             group_id = line_to_group[line_id]
-            if group_id in group_hc_lookup:
-                avg_hc = group_hc_lookup[group_id]
+            if group_id in group_avg_hc_lookup:
+                avg_hc = group_avg_hc_lookup[group_id]
+                min_hc = group_min_hc_lookup.get(group_id)
+                if LINE_DYNAMIC_COLOR_OPTION == 2:
+                    hc_value = min_hc
+                else:
+                    hc_value = avg_hc
         elif hc_lookup:
             hc1 = hc_lookup.get(bus1)
             hc2 = hc_lookup.get(bus2)
             
             if hc1 is not None and hc2 is not None:
                 avg_hc = (hc1 + hc2) / 2
+                min_hc = min(hc1, hc2)
+                if LINE_DYNAMIC_COLOR_OPTION == 2:
+                    hc_value = min_hc
+                else:
+                    hc_value = avg_hc
             elif hc1 is not None:
-                avg_hc = hc1
+                hc_value = hc1
             elif hc2 is not None:
-                avg_hc = hc2
-            else:
-                pass
+                hc_value = hc2
         
-        results.append({"X1": x1, "Y1": y1, "X2": x2, "Y2": y2, "HC": avg_hc})
+        results.append({"X1": x1, "Y1": y1, "X2": x2, "Y2": y2, "HC": hc_value})
     
     return pd.DataFrame(results)
 
@@ -162,10 +177,12 @@ def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, h
     if hc_data is not None and not hc_data.empty:
         hc_lookup = hc_data.set_index("BusId")["HC"].to_dict()
     
-    group_hc_lookup = {}
+    group_avg_hc_lookup = {}
+    group_min_hc_lookup = {}
     line_to_group = {}
     if group_hc_df is not None and not group_hc_df.empty and line_group_df is not None and not line_group_df.empty:
-        group_hc_lookup = group_hc_df.set_index("GroupID")["AvgHC"].to_dict()
+        group_avg_hc_lookup = group_hc_df.set_index("GroupID")["AvgHC"].to_dict()
+        group_min_hc_lookup = group_hc_df.set_index("GroupID")["MinHC"].to_dict()
         line_to_group = line_group_df.set_index("LineID")["GroupID"].to_dict()
     
     results = []
@@ -184,30 +201,35 @@ def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, h
             if bus2 in bus_xy:
                 pts.append([bus_xy[bus2]["X"], bus_xy[bus2]["Y"]])
         
-        avg_hc = None
+        hc_value = None
         
-        if group_hc_lookup and line_id in line_to_group:
+        if group_avg_hc_lookup and line_id in line_to_group:
             group_id = line_to_group[line_id]
-            if group_id in group_hc_lookup:
-                avg_hc = group_hc_lookup[group_id]
+            if group_id in group_avg_hc_lookup:
+                avg_hc = group_avg_hc_lookup[group_id]
+                min_hc = group_min_hc_lookup.get(group_id)
+                if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
+                    hc_value = min_hc
+                else:
+                    hc_value = avg_hc
         elif hc_lookup:
             hc1 = hc_lookup.get(bus1)
             hc2 = hc_lookup.get(bus2)
             
             if hc1 is not None and hc2 is not None:
                 avg_hc = (hc1 + hc2) / 2
+                min_hc = min(hc1, hc2)
+                if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
+                    hc_value = min_hc
+                else:
+                    hc_value = avg_hc
             elif hc1 is not None:
-                avg_hc = hc1
-                # print(f"[INFO] Proper Line {row.get('ID')}: Bus1 has HC, Bus2 does not. Using Bus1 HC={hc1}")
+                hc_value = hc1
             elif hc2 is not None:
-                avg_hc = hc2
-                # print(f"[INFO] Proper Line {row.get('ID')}: Bus2 has HC, Bus1 does not. Using Bus2 HC={hc2}")
-            else:
-                pass
-                # print(f"[WARN] Proper Line {row.get('ID')}: No HC data for Bus1={bus1} or Bus2={bus2}")
+                hc_value = hc2
         
         if len(pts) >= 2:
-            results.append({"X": [p[0] for p in pts], "Y": [p[1] for p in pts], "HC": avg_hc})
+            results.append({"X": [p[0] for p in pts], "Y": [p[1] for p in pts], "HC": hc_value})
     
     return pd.DataFrame(results)
 
@@ -318,17 +340,17 @@ def find_connected_line_groups_with_switches_and_transformers(
 
 def calculate_group_hc(line_group_df: pd.DataFrame, line: pd.DataFrame, hc_data: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculate average HC for each line group based on ALL circles connected to that group.
+    Calculate average and minimum HC for each line group based on ALL circles connected to that group.
     
     Args:
         line_group_df: DataFrame with [LineID, GroupID]
         line: DataFrame with [ID, Bus1, Bus2]
         hc_data: DataFrame with [BusId, HC]
     
-    Returns: DataFrame with [GroupID, AvgHC]
+    Returns: DataFrame with [GroupID, AvgHC, MinHC]
     """
     if line_group_df.empty or line.empty or hc_data.empty:
-        return pd.DataFrame(columns=["GroupID", "AvgHC"])
+        return pd.DataFrame(columns=["GroupID", "AvgHC", "MinHC"])
     
     hc_lookup = hc_data.set_index("BusId")["HC"].to_dict()
     line_to_group = line_group_df.set_index("LineID")["GroupID"].to_dict()
@@ -352,11 +374,12 @@ def calculate_group_hc(line_group_df: pd.DataFrame, line: pd.DataFrame, hc_data:
         
         if hc_values:
             avg_hc = sum(hc_values) / len(hc_values)
+            min_hc = min(hc_values)
         else:
             avg_hc = None
-            # print(f"[WARN] Group {group_id}: No HC data for any of {len(all_buses)} buses")
+            min_hc = None
         
-        results.append({"GroupID": group_id, "AvgHC": avg_hc})
+        results.append({"GroupID": group_id, "AvgHC": avg_hc, "MinHC": min_hc})
     
     return pd.DataFrame(results)
 
