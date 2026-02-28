@@ -26,29 +26,31 @@ CRITICAL_HOUR_DEMAND = 12
 # ---------- Line Settings ----------
 PLOT_LINES = False  # Now enabled (black lines)
 
-LINE_WIDTH = 0.3  # Width of the line in points. Range: 0 (no line) to ~2+ (thick line). Typical range: 0.1-1.0.
-LINE_ALPHA = 1.0  # Transparency of the line. Range: 0 (invisible) to 1 (fully opaque).
+LINE_WIDTH = 0.6  # Width of the line in points. Range: 0 (no line) to ~2+ (thick line). Typical range: 0.1-1.0.
+LINE_ALPHA = 0.8  # Transparency of the line. Range: 0 (invisible) to 1 (fully opaque).
 LINE_COLOR = "black"  # Color of the line. Use any matplotlib color name (e.g., "black", "white", "red") or hex code (e.g., "#000000").
 LINE_DYNAMIC_COLOR = True  # If True, color lines by average HC of connected buses (overrides LINE_COLOR)
 LINE_GROUP_CONNECTIVITY = True  # If True, use connected line groups for color (all lines in a connected group share the same color)
+LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS = False  # If True, include switches and transformers when determining connected line groups
 
 # ---------- Proper Line (Line Segments) with Segments Settings ----------
 PLOT_PROPER_LINES = True  # Toggle proper segment-based lines on/off
 
-PROPER_LINE_WIDTH = 0.3   # Width of proper lines
-PROPER_LINE_ALPHA = 1.0   # Transparency of proper lines
+PROPER_LINE_WIDTH = 0.6   # Width of proper lines
+PROPER_LINE_ALPHA = 0.8   # Transparency of proper lines
 PROPER_LINE_COLOR = "blue"  # Color of proper lines (blue to distinguish from black direct lines)
 PROPER_LINE_DYNAMIC_COLOR = True  # If True, color lines by average HC of connected buses (overrides PROPER_LINE_COLOR)
 PROPER_LINE_GROUP_CONNECTIVITY = True  # If True, use connected line groups for color (all lines in a connected group share the same color)
+PROPER_LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS = True  # If True, include switches and transformers when determining connected line groups
 
 # ---------- Circle Settings ----------
 PLOT_CIRCLES = True  # Toggle circle points on/off (master toggle)
 
 # Circle fill (inside)
 PLOT_CIRCLE_FILL = True  # Toggle circle fill color on/off. When True, circles are colored by HC values using CIRCLE_CMAP. When False, circles appear in a plain gray color.
-CIRCLE_SIZE = 6  # Size of circles in points. Larger values make circles more visible. Typical range: 5-20.
+CIRCLE_SIZE = 5  # Size of circles in points. Larger values make circles more visible. Typical range: 5-20.
 CIRCLE_CMAP = "RdYlGn"  # Color map for circle fill. "RdYlGn" maps red (low HC) → yellow (medium) → green (high HC). Other options: "viridis", "plasma", "cool", "hot". Only used if PLOT_CIRCLE_FILL is True.
-CIRCLE_ALPHA = 0.7  # Transparency of circle fill. Range: 0 (invisible) to 1 (fully opaque). Lower values make overlapping circles more visible.
+CIRCLE_ALPHA = 1.0  # Transparency of circle fill. Range: 0 (invisible) to 1 (fully opaque). Lower values make overlapping circles more visible.
 
 # Circle border (outline)
 PLOT_CIRCLE_EDGE = True  # Toggle circle border/outline on/off. When True, circles have a visible edge. When False, circles have no outline.
@@ -56,11 +58,11 @@ CIRCLE_EDGE_COLOR = "black"  # Color of the circle outline. Use any matplotlib c
 CIRCLE_EDGE_WIDTH = 0.5  # Thickness of the circle outline in points. Range: 0 (no outline) to ~2+ (thick outline). Typical range: 0.1-1.0.
 
 # ---------- Background Settings ----------
-BACKGROUND_COLOR = "lightgray"  # Background color of the plot. Use any matplotlib color name or hex code. "lightgray" provides good contrast for both dark and light elements.
+BACKGROUND_COLOR = "gray"  # Background color of the plot. Use any matplotlib color name or hex code. "lightgray" provides good contrast for both dark and light elements.
 
 # ---------- Output Settings ----------
 SAVE_HIGH_RES = True   # Save additional high-resolution PNG version
-HIGH_RES_DPI = 300    # DPI for high-resolution version (default is ~100)
+HIGH_RES_DPI = 900    # DPI for high-resolution version (default is ~100)
 SAVE_SVG = True       # Save vector SVG version
 
 
@@ -78,8 +80,10 @@ def read_db_tables(db_path: Path):
         line = pd.read_sql_query("SELECT * FROM Line;", con)
     except Exception:
         line = pd.DataFrame()
+    switch = pd.read_sql_query("SELECT * FROM Switch;", con)
+    transformer = pd.read_sql_query("SELECT * FROM Transformer;", con)
     con.close()
-    return bus, cgp, line
+    return bus, cgp, line, switch, transformer
 
 
 def cgp_coordinates(bus: pd.DataFrame, cgp: pd.DataFrame) -> pd.DataFrame:
@@ -247,6 +251,66 @@ def find_connected_line_groups(line: pd.DataFrame) -> pd.DataFrame:
     
     group_map = {}
     for line_id in parent.keys():
+        group_map[line_id] = find(line_id)
+    
+    return pd.DataFrame(list(group_map.items()), columns=["LineID", "GroupID"])
+
+
+def find_connected_line_groups_with_switches_and_transformers(
+    line: pd.DataFrame,
+    switch: pd.DataFrame,
+    transformer: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Find groups of electrically connected lines using Union-Find.
+    Lines are connected if they:
+    1. Share a common bus, OR
+    2. Are connected through closed switches (State1=1 AND State2=1), OR
+    3. Are connected through transformers
+    
+    Returns: DataFrame with columns [LineID, GroupID]
+    """
+    from collections import defaultdict
+    
+    if line.empty:
+        return pd.DataFrame(columns=["LineID", "GroupID"])
+    
+    parent = {}
+    
+    def find(x):
+        if x not in parent:
+            parent[x] = x
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+    
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+    
+    for _, row in line.iterrows():
+        line_id = row["ID"]
+        find(line_id)
+        union(line_id, row["Bus1"])
+        union(line_id, row["Bus2"])
+    
+    if switch is not None and not switch.empty:
+        closed_switches = switch[(switch["State1"] == 1) & (switch["State2"] == 1)]
+        for _, row in closed_switches.iterrows():
+            find(row["Bus1"])
+            find(row["Bus2"])
+            union(row["Bus1"], row["Bus2"])
+    
+    if transformer is not None and not transformer.empty:
+        for _, row in transformer.iterrows():
+            if pd.notna(row.get("Bus1")) and pd.notna(row.get("Bus2")):
+                find(row["Bus1"])
+                find(row["Bus2"])
+                union(row["Bus1"], row["Bus2"])
+    
+    group_map = {}
+    for line_id in line["ID"]:
         group_map[line_id] = find(line_id)
     
     return pd.DataFrame(list(group_map.items()), columns=["LineID", "GroupID"])
@@ -448,6 +512,8 @@ def main():
     all_lines = []
     all_hc_data = []
     all_buses = []
+    all_switches = []
+    all_transformers = []
 
     station_dirs = sorted([p for p in root.iterdir() if p.is_dir()])
 
@@ -468,7 +534,7 @@ def main():
 
         dem["HC"] = dem[["PA", "PB", "PC"]].min(axis=1)
 
-        bus, cgp, line = read_db_tables(db_path)
+        bus, cgp, line, switch, transformer = read_db_tables(db_path)
         cgp_xy = cgp_coordinates(bus, cgp)
 
         dem = dem.merge(cgp_xy, on="BusId", how="left")
@@ -481,11 +547,15 @@ def main():
         
         if PLOT_LINES and LINE_GROUP_CONNECTIVITY:
             all_lines.append(line)
+            all_switches.append(switch)
+            all_transformers.append(transformer)
             all_hc_data.append(dem[["BusId", "HC"]])
             all_buses.append(bus)
         
         if PLOT_PROPER_LINES and PROPER_LINE_GROUP_CONNECTIVITY:
             all_lines.append(line)
+            all_switches.append(switch)
+            all_transformers.append(transformer)
             all_hc_data.append(dem[["BusId", "HC"]])
             all_buses.append(bus)
         
@@ -499,17 +569,28 @@ def main():
     
     # Calculate line groups and group HC once (can be used for both normal lines and proper lines)
     lines_for_grouping = []
+    use_switches_and_transformers = False
+    
     if PLOT_LINES and LINE_GROUP_CONNECTIVITY:
         lines_for_grouping = all_lines
+        use_switches_and_transformers = LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS
     elif PLOT_PROPER_LINES and PROPER_LINE_GROUP_CONNECTIVITY:
         lines_for_grouping = all_lines
+        use_switches_and_transformers = PROPER_LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS
     
     if lines_for_grouping:
         all_lines_df = pd.concat(lines_for_grouping, ignore_index=True)
         all_hc_df = pd.concat(all_hc_data, ignore_index=True).dropna(subset=["BusId", "HC"])
         all_buses_df = pd.concat(all_buses, ignore_index=True)
         
-        line_group_df = find_connected_line_groups(all_lines_df)
+        if use_switches_and_transformers:
+            all_switches_df = pd.concat(all_switches, ignore_index=True) if all_switches else pd.DataFrame()
+            all_transformers_df = pd.concat(all_transformers, ignore_index=True) if all_transformers else pd.DataFrame()
+            line_group_df = find_connected_line_groups_with_switches_and_transformers(
+                all_lines_df, all_switches_df, all_transformers_df
+            )
+        else:
+            line_group_df = find_connected_line_groups(all_lines_df)
         group_hc_df = calculate_group_hc(line_group_df, all_lines_df, all_hc_df)
         
         # Process normal lines with group connectivity if enabled
@@ -534,7 +615,7 @@ def main():
                 
                 dem["HC"] = dem[["PA", "PB", "PC"]].min(axis=1)
                 
-                bus, cgp, line = read_db_tables(db_path)
+                bus, cgp, line, switch, transformer = read_db_tables(db_path)
                 seg = line_segments(bus, line, dem[["BusId", "HC"]], group_hc_df, line_group_df)
                 if not seg.empty:
                     seg_all.append(seg)
@@ -561,7 +642,7 @@ def main():
                 
                 dem["HC"] = dem[["PA", "PB", "PC"]].min(axis=1)
                 
-                bus, cgp, line = read_db_tables(db_path)
+                bus, cgp, line, switch, transformer = read_db_tables(db_path)
                 proper_seg = proper_line_segments(bus, line, db_path, dem[["BusId", "HC"]], group_hc_df, line_group_df)
                 if not proper_seg.empty:
                     proper_seg_all.append(proper_seg)
@@ -681,6 +762,15 @@ def main():
             subprocess.run(["xdg-open", str(outpath)])
     except Exception as e:
         print(f"[WARN] Could not open file: {e}")
+
+    total_open_switches = sum(len(s[(s["State1"] != 1) | (s["State2"] != 1)]) for s in all_switches if not s.empty)
+    total_closed_switches = sum(len(s[(s["State1"] == 1) & (s["State2"] == 1)]) for s in all_switches if not s.empty)
+    total_transformers = sum(len(t) for t in all_transformers if not t.empty)
+
+    print(f"[INFO] Total open switches: {total_open_switches}")
+    print(f"[INFO] Total closed switches: {total_closed_switches}")
+    print(f"[INFO] Total transformers: {total_transformers}")
+    print("[OK] Code finished without problems.")
 
 
 if __name__ == "__main__":
