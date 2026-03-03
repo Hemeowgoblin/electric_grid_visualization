@@ -36,17 +36,19 @@ LINE_DYNAMIC_COLOR = True  # If True, color lines by average HC of connected bus
 LINE_DYNAMIC_COLOR_OPTION = 1  # 1=use average HC, 2=use minimum HC
 LINE_GROUP_CONNECTIVITY = True  # If True, use connected line groups for color (all lines in a connected group share the same color)
 LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS = False  # If True, include switches and transformers when determining connected line groups
+LINE_GROUP_CONNECTIVITY_OPTION = 1  # 1=use group HC for all lines, 2=override with direct circle HC for lines connected to circles
 
 # ---------- Proper Line (Line Segments) with Segments Settings ----------
 PLOT_PROPER_LINES = True  # Toggle proper segment-based lines on/off
 
 PROPER_LINE_WIDTH = 0.6   # Width of proper lines
-PROPER_LINE_ALPHA = 0.8   # Transparency of proper lines
+PROPER_LINE_ALPHA = 0.9   # Transparency of proper lines
 PROPER_LINE_COLOR = "blue"  # Color of proper lines (blue to distinguish from black direct lines)
 PROPER_LINE_DYNAMIC_COLOR = True  # If True, color lines by the HC of connected buses (overrides PROPER_LINE_COLOR)
-PROPER_LINE_DYNAMIC_COLOR_OPTION = 2  # 1=use average HC, 2=use minimum HC
+PROPER_LINE_DYNAMIC_COLOR_OPTION = 1  # 1=use average HC, 2=use minimum HC
 PROPER_LINE_GROUP_CONNECTIVITY = True  # If True, use connected line groups for color (all lines in a connected group share the same color)
 PROPER_LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS = True  # If True, include switches and transformers when determining connected line groups
+PROPER_LINE_GROUP_CONNECTIVITY_OPTION = 2  # 1=use group HC for all lines, 2=override with direct circle HC for lines connected to circles
 
 # ---------- Circle Settings ----------
 PLOT_CIRCLES = True  # Toggle circle points on/off (master toggle)
@@ -63,7 +65,7 @@ CIRCLE_EDGE_COLOR = "black"  # Color of the circle outline. Use any matplotlib c
 CIRCLE_EDGE_WIDTH = 0.5  # Thickness of the circle outline in points. Range: 0 (no outline) to ~2+ (thick outline). Typical range: 0.1-1.0.
 
 # ---------- Background Settings ----------
-BACKGROUND_COLOR = "white"  # Background color of the plot. Use any matplotlib color name or hex code. "lightgray" provides good contrast for both dark and light elements.
+BACKGROUND_COLOR = "lightgray"  # Background color of the plot. Use any matplotlib color name or hex code. "lightgray" provides good contrast for both dark and light elements.
 
 # ---------- Output Settings ----------
 SAVE_HIGH_RES = True   # Save additional high-resolution PNG version
@@ -100,7 +102,7 @@ def cgp_coordinates(bus: pd.DataFrame, cgp: pd.DataFrame) -> pd.DataFrame:
     return out[["BusId", "X", "Y"]]
 
 
-def line_segments(bus: pd.DataFrame, line: pd.DataFrame, hc_data: pd.DataFrame = None, group_hc_df: pd.DataFrame = None, line_group_df: pd.DataFrame = None) -> pd.DataFrame:
+def line_segments(bus: pd.DataFrame, line: pd.DataFrame, hc_data: pd.DataFrame = None, group_hc_df: pd.DataFrame = None, line_group_df: pd.DataFrame = None, line_group_connectivity_option: int = None) -> pd.DataFrame:
     if line.empty:
         return pd.DataFrame()
     bus = bus.rename(columns={"ID": "BusId"})
@@ -127,7 +129,8 @@ def line_segments(bus: pd.DataFrame, line: pd.DataFrame, hc_data: pd.DataFrame =
         x1, y1 = row.get("X1"), row.get("Y1")
         x2, y2 = row.get("X2"), row.get("Y2")
         
-        hc_value = None
+        group_hc = None
+        visualized_hc = None
         
         if group_avg_hc_lookup and line_id in line_to_group:
             group_id = line_to_group[line_id]
@@ -135,31 +138,48 @@ def line_segments(bus: pd.DataFrame, line: pd.DataFrame, hc_data: pd.DataFrame =
                 avg_hc = group_avg_hc_lookup[group_id]
                 min_hc = group_min_hc_lookup.get(group_id)
                 if LINE_DYNAMIC_COLOR_OPTION == 2:
-                    hc_value = min_hc
+                    group_hc = min_hc
                 else:
-                    hc_value = avg_hc
-        elif hc_lookup:
-            hc1 = hc_lookup.get(bus1)
-            hc2 = hc_lookup.get(bus2)
-            
-            if hc1 is not None and hc2 is not None:
-                avg_hc = (hc1 + hc2) / 2
-                min_hc = min(hc1, hc2)
-                if LINE_DYNAMIC_COLOR_OPTION == 2:
-                    hc_value = min_hc
-                else:
-                    hc_value = avg_hc
-            elif hc1 is not None:
-                hc_value = hc1
-            elif hc2 is not None:
-                hc_value = hc2
+                    group_hc = avg_hc
         
-        results.append({"X1": x1, "Y1": y1, "X2": x2, "Y2": y2, "HC": hc_value})
+        if line_group_connectivity_option == 2 and hc_lookup:
+            direct_hc_values = []
+            if bus1 in hc_lookup and pd.notna(hc_lookup[bus1]):
+                direct_hc_values.append(hc_lookup[bus1])
+            if bus2 in hc_lookup and pd.notna(hc_lookup[bus2]):
+                direct_hc_values.append(hc_lookup[bus2])
+            
+            if direct_hc_values:
+                if LINE_DYNAMIC_COLOR_OPTION == 2:
+                    visualized_hc = min(direct_hc_values)
+                else:
+                    visualized_hc = sum(direct_hc_values) / len(direct_hc_values)
+            else:
+                visualized_hc = group_hc
+        else:
+            if group_hc is not None:
+                visualized_hc = group_hc
+            elif hc_lookup:
+                hc1 = hc_lookup.get(bus1)
+                hc2 = hc_lookup.get(bus2)
+                if hc1 is not None and hc2 is not None:
+                    avg_hc = (hc1 + hc2) / 2
+                    min_hc = min(hc1, hc2)
+                    if LINE_DYNAMIC_COLOR_OPTION == 2:
+                        visualized_hc = min_hc
+                    else:
+                        visualized_hc = avg_hc
+                elif hc1 is not None:
+                    visualized_hc = hc1
+                elif hc2 is not None:
+                    visualized_hc = hc2
+        
+        results.append({"X1": x1, "Y1": y1, "X2": x2, "Y2": y2, "GroupHC": group_hc, "VisualizedHC": visualized_hc})
     
     return pd.DataFrame(results)
 
 
-def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, hc_data: pd.DataFrame = None, group_hc_df: pd.DataFrame = None, line_group_df: pd.DataFrame = None) -> pd.DataFrame:
+def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, hc_data: pd.DataFrame = None, group_hc_df: pd.DataFrame = None, line_group_df: pd.DataFrame = None, proper_line_group_connectivity_option: int = None) -> pd.DataFrame:
     if line.empty:
         return pd.DataFrame()
     
@@ -201,7 +221,8 @@ def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, h
             if bus2 in bus_xy:
                 pts.append([bus_xy[bus2]["X"], bus_xy[bus2]["Y"]])
         
-        hc_value = None
+        group_hc = None
+        visualized_hc = None
         
         if group_avg_hc_lookup and line_id in line_to_group:
             group_id = line_to_group[line_id]
@@ -209,27 +230,44 @@ def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, h
                 avg_hc = group_avg_hc_lookup[group_id]
                 min_hc = group_min_hc_lookup.get(group_id)
                 if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
-                    hc_value = min_hc
+                    group_hc = min_hc
                 else:
-                    hc_value = avg_hc
-        elif hc_lookup:
-            hc1 = hc_lookup.get(bus1)
-            hc2 = hc_lookup.get(bus2)
+                    group_hc = avg_hc
+        
+        if proper_line_group_connectivity_option == 2 and hc_lookup:
+            direct_hc_values = []
+            if bus1 in hc_lookup and pd.notna(hc_lookup[bus1]):
+                direct_hc_values.append(hc_lookup[bus1])
+            if bus2 in hc_lookup and pd.notna(hc_lookup[bus2]):
+                direct_hc_values.append(hc_lookup[bus2])
             
-            if hc1 is not None and hc2 is not None:
-                avg_hc = (hc1 + hc2) / 2
-                min_hc = min(hc1, hc2)
+            if direct_hc_values:
                 if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
-                    hc_value = min_hc
+                    visualized_hc = min(direct_hc_values)
                 else:
-                    hc_value = avg_hc
-            elif hc1 is not None:
-                hc_value = hc1
-            elif hc2 is not None:
-                hc_value = hc2
+                    visualized_hc = sum(direct_hc_values) / len(direct_hc_values)
+            else:
+                visualized_hc = group_hc
+        else:
+            if group_hc is not None:
+                visualized_hc = group_hc
+            elif hc_lookup:
+                hc1 = hc_lookup.get(bus1)
+                hc2 = hc_lookup.get(bus2)
+                if hc1 is not None and hc2 is not None:
+                    avg_hc = (hc1 + hc2) / 2
+                    min_hc = min(hc1, hc2)
+                    if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
+                        visualized_hc = min_hc
+                    else:
+                        visualized_hc = avg_hc
+                elif hc1 is not None:
+                    visualized_hc = hc1
+                elif hc2 is not None:
+                    visualized_hc = hc2
         
         if len(pts) >= 2:
-            results.append({"X": [p[0] for p in pts], "Y": [p[1] for p in pts], "HC": hc_value})
+            results.append({"X": [p[0] for p in pts], "Y": [p[1] for p in pts], "GroupHC": group_hc, "VisualizedHC": visualized_hc})
     
     return pd.DataFrame(results)
 
@@ -590,14 +628,33 @@ def main():
     pts = pd.concat(pts_all, ignore_index=True).dropna(subset=["X", "Y", "HC"])
     # Don't concatenate here - wait until after group connectivity processing
     
-    # Calculate line groups and group HC once (can be used for both normal lines and proper lines)
+    # Calculate line groups and group HC
+    # Handle normal lines and proper lines independently to allow different settings
+    need_line_grouping = PLOT_LINES and LINE_GROUP_CONNECTIVITY
+    need_proper_line_grouping = PLOT_PROPER_LINES and PROPER_LINE_GROUP_CONNECTIVITY
+    
+    # Determine if we need to calculate groups and with what settings
     lines_for_grouping = []
     use_switches_and_transformers = False
+    proper_line_use_switches_and_transformers = False
     
-    if PLOT_LINES and LINE_GROUP_CONNECTIVITY:
+    if need_line_grouping and need_proper_line_grouping:
+        # Both need grouping - check if settings are compatible
+        line_use_swt = LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS
+        proper_use_swt = PROPER_LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS
+        if line_use_swt == proper_use_swt:
+            # Same settings - can use shared grouping
+            lines_for_grouping = all_lines
+            use_switches_and_transformers = line_use_swt
+        else:
+            # Different settings - need separate processing
+            # For now, process normal lines first, then proper lines
+            lines_for_grouping = all_lines
+            use_switches_and_transformers = line_use_swt
+    elif need_line_grouping:
         lines_for_grouping = all_lines
         use_switches_and_transformers = LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS
-    elif PLOT_PROPER_LINES and PROPER_LINE_GROUP_CONNECTIVITY:
+    elif need_proper_line_grouping:
         lines_for_grouping = all_lines
         use_switches_and_transformers = PROPER_LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS
     
@@ -639,7 +696,7 @@ def main():
                 dem["HC"] = dem[["PA", "PB", "PC"]].min(axis=1)
                 
                 bus, cgp, line, switch, transformer = read_db_tables(db_path)
-                seg = line_segments(bus, line, dem[["BusId", "HC"]], group_hc_df, line_group_df)
+                seg = line_segments(bus, line, dem[["BusId", "HC"]], group_hc_df, line_group_df, LINE_GROUP_CONNECTIVITY_OPTION)
                 if not seg.empty:
                     seg_all.append(seg)
         
@@ -666,7 +723,7 @@ def main():
                 dem["HC"] = dem[["PA", "PB", "PC"]].min(axis=1)
                 
                 bus, cgp, line, switch, transformer = read_db_tables(db_path)
-                proper_seg = proper_line_segments(bus, line, db_path, dem[["BusId", "HC"]], group_hc_df, line_group_df)
+                proper_seg = proper_line_segments(bus, line, db_path, dem[["BusId", "HC"]], group_hc_df, line_group_df, PROPER_LINE_GROUP_CONNECTIVITY_OPTION)
                 if not proper_seg.empty:
                     proper_seg_all.append(proper_seg)
         
@@ -692,9 +749,9 @@ def main():
 
     if not seg.empty:
         for _, r in seg.iterrows():
-            if LINE_DYNAMIC_COLOR and pd.notna(r.get("HC")):
+            if LINE_DYNAMIC_COLOR and pd.notna(r.get("VisualizedHC")):
                 if hc_max > hc_min:
-                    normalized = (r["HC"] - hc_min) / (hc_max - hc_min)
+                    normalized = (r["VisualizedHC"] - hc_min) / (hc_max - hc_min)
                 else:
                     normalized = 0.5
                 color = plt.cm.get_cmap(CIRCLE_CMAP)(normalized)
@@ -710,9 +767,9 @@ def main():
 
     if PLOT_PROPER_LINES and not proper_seg.empty:
         for _, r in proper_seg.iterrows():
-            if PROPER_LINE_DYNAMIC_COLOR and pd.notna(r.get("HC")):
+            if PROPER_LINE_DYNAMIC_COLOR and pd.notna(r.get("VisualizedHC")):
                 if hc_max > hc_min:
-                    normalized = (r["HC"] - hc_min) / (hc_max - hc_min)
+                    normalized = (r["VisualizedHC"] - hc_min) / (hc_max - hc_min)
                 else:
                     normalized = 0.5
                 color = plt.cm.get_cmap(CIRCLE_CMAP)(normalized)
