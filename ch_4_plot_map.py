@@ -36,7 +36,7 @@ LINE_DYNAMIC_COLOR = True  # If True, color lines by average HC of connected bus
 LINE_DYNAMIC_COLOR_OPTION = 1  # 1=use average HC, 2=use minimum HC
 LINE_GROUP_CONNECTIVITY = True  # If True, use connected line groups for color (all lines in a connected group share the same color)
 LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS = False  # If True, include switches and transformers when determining connected line groups
-LINE_GROUP_CONNECTIVITY_OPTION = 1  # 1=use group HC for all lines, 2=override with direct circle HC for lines connected to circles
+LINE_GROUP_CONNECTIVITY_OPTION = 1  # 1=use group HC for all lines, 2=override with direct circle HC for lines connected to circles, 3=iterative HC propagation through entities
 
 # ---------- Proper Line (Line Segments) with Segments Settings ----------
 PLOT_PROPER_LINES = True  # Toggle proper segment-based lines on/off
@@ -48,7 +48,7 @@ PROPER_LINE_DYNAMIC_COLOR = True  # If True, color lines by the HC of connected 
 PROPER_LINE_DYNAMIC_COLOR_OPTION = 1  # 1=use average HC, 2=use minimum HC
 PROPER_LINE_GROUP_CONNECTIVITY = True  # If True, use connected line groups for color (all lines in a connected group share the same color)
 PROPER_LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS = True  # If True, include switches and transformers when determining connected line groups
-PROPER_LINE_GROUP_CONNECTIVITY_OPTION = 2  # 1=use group HC for all lines, 2=override with direct circle HC for lines connected to circles
+PROPER_LINE_GROUP_CONNECTIVITY_OPTION = 3  # 1=use group HC for all lines, 2=override with direct circle HC for lines connected to circles, 3=iterative HC propagation through entities
 
 # ---------- Circle Settings ----------
 PLOT_CIRCLES = True  # Toggle circle points on/off (master toggle)
@@ -179,7 +179,7 @@ def line_segments(bus: pd.DataFrame, line: pd.DataFrame, hc_data: pd.DataFrame =
     return pd.DataFrame(results)
 
 
-def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, hc_data: pd.DataFrame = None, group_hc_df: pd.DataFrame = None, line_group_df: pd.DataFrame = None, proper_line_group_connectivity_option: int = None) -> pd.DataFrame:
+def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, hc_data: pd.DataFrame = None, group_hc_df: pd.DataFrame = None, line_group_df: pd.DataFrame = None, proper_line_group_connectivity_option: int = None, propagated_bus_hc: dict = None) -> pd.DataFrame:
     if line.empty:
         return pd.DataFrame()
     
@@ -205,10 +205,24 @@ def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, h
         group_min_hc_lookup = group_hc_df.set_index("GroupID")["MinHC"].to_dict()
         line_to_group = line_group_df.set_index("LineID")["GroupID"].to_dict()
     
+    use_propagated_hc = (proper_line_group_connectivity_option == 3 and propagated_bus_hc is not None)
+    
     results = []
     for _, row in line.iterrows():
         line_id = row["ID"]
         bus1, bus2 = row.get("Bus1"), row.get("Bus2")
+        
+        def normalize(bid):
+            if pd.isna(bid):
+                return None
+            try:
+                return int(float(bid))
+            except (ValueError, TypeError):
+                return None
+        
+        norm_bus1 = normalize(bus1)
+        norm_bus2 = normalize(bus2)
+        
         seg1, seg2 = row.get("Seg1"), row.get("Seg2")
         
         if pd.notna(seg1) and pd.notna(seg2):
@@ -224,7 +238,47 @@ def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, h
         group_hc = None
         visualized_hc = None
         
-        if group_avg_hc_lookup and line_id in line_to_group:
+        if use_propagated_hc:
+            hc_values = []
+            circle_hc_values = []
+            
+            def normalize(bid):
+                if pd.isna(bid):
+                    return None
+                try:
+                    return int(float(bid))
+                except (ValueError, TypeError):
+                    return None
+            
+            norm_bus1 = normalize(bus1)
+            norm_bus2 = normalize(bus2)
+            
+            # First check for direct circle HC (hc_lookup)
+            if bus1 in hc_lookup and pd.notna(hc_lookup.get(bus1)):
+                circle_hc_values.append(hc_lookup[bus1])
+            elif norm_bus1 is not None and norm_bus1 in propagated_bus_hc:
+                hc_values.append(propagated_bus_hc[norm_bus1][0])
+            
+            if bus2 in hc_lookup and pd.notna(hc_lookup.get(bus2)):
+                circle_hc_values.append(hc_lookup[bus2])
+            elif norm_bus2 is not None and norm_bus2 in propagated_bus_hc:
+                hc_values.append(propagated_bus_hc[norm_bus2][0])
+            
+            # If connected to circles (circle_hc_values), use ONLY those
+            if circle_hc_values:
+                if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
+                    visualized_hc = min(circle_hc_values)
+                else:
+                    visualized_hc = sum(circle_hc_values) / len(circle_hc_values)
+            elif hc_values:
+                if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
+                    visualized_hc = min(hc_values)
+                else:
+                    visualized_hc = sum(hc_values) / len(hc_values)
+            else:
+                visualized_hc = None
+            group_hc = visualized_hc
+        elif group_avg_hc_lookup and line_id in line_to_group:
             group_id = line_to_group[line_id]
             if group_id in group_avg_hc_lookup:
                 avg_hc = group_avg_hc_lookup[group_id]
@@ -233,21 +287,38 @@ def proper_line_segments(bus: pd.DataFrame, line: pd.DataFrame, db_path: Path, h
                     group_hc = min_hc
                 else:
                     group_hc = avg_hc
-        
-        if proper_line_group_connectivity_option == 2 and hc_lookup:
-            direct_hc_values = []
-            if bus1 in hc_lookup and pd.notna(hc_lookup[bus1]):
-                direct_hc_values.append(hc_lookup[bus1])
-            if bus2 in hc_lookup and pd.notna(hc_lookup[bus2]):
-                direct_hc_values.append(hc_lookup[bus2])
             
-            if direct_hc_values:
-                if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
-                    visualized_hc = min(direct_hc_values)
+            if proper_line_group_connectivity_option == 2 and hc_lookup:
+                direct_hc_values = []
+                if bus1 in hc_lookup and pd.notna(hc_lookup[bus1]):
+                    direct_hc_values.append(hc_lookup[bus1])
+                if bus2 in hc_lookup and pd.notna(hc_lookup[bus2]):
+                    direct_hc_values.append(hc_lookup[bus2])
+                
+                if direct_hc_values:
+                    if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
+                        visualized_hc = min(direct_hc_values)
+                    else:
+                        visualized_hc = sum(direct_hc_values) / len(direct_hc_values)
                 else:
-                    visualized_hc = sum(direct_hc_values) / len(direct_hc_values)
+                    visualized_hc = group_hc
             else:
-                visualized_hc = group_hc
+                if group_hc is not None:
+                    visualized_hc = group_hc
+                elif hc_lookup:
+                    hc1 = hc_lookup.get(bus1)
+                    hc2 = hc_lookup.get(bus2)
+                    if hc1 is not None and hc2 is not None:
+                        avg_hc = (hc1 + hc2) / 2
+                        min_hc = min(hc1, hc2)
+                        if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
+                            visualized_hc = min_hc
+                        else:
+                            visualized_hc = avg_hc
+                    elif hc1 is not None:
+                        visualized_hc = hc1
+                    elif hc2 is not None:
+                        visualized_hc = hc2
         else:
             if group_hc is not None:
                 visualized_hc = group_hc
@@ -422,6 +493,204 @@ def calculate_group_hc(line_group_df: pd.DataFrame, line: pd.DataFrame, hc_data:
     return pd.DataFrame(results)
 
 
+def build_entity_bus_mapping(line: pd.DataFrame, switch: pd.DataFrame, transformer: pd.DataFrame, cgp: pd.DataFrame, use_switches_and_transformers: bool) -> dict:
+    """
+    Build a mapping of entities (lines, switches, transformers, CGPs) to their buses.
+    
+    Args:
+        line: DataFrame with line data (must have ID, Bus1, Bus2 columns)
+        switch: DataFrame with switch data (must have ID, Bus1, Bus2, State1, State2 columns)
+        transformer: DataFrame with transformer data (must have ID, Bus1, Bus2 columns)
+        cgp: DataFrame with CGP data (must have BusId column)
+        use_switches_and_transformers: If True, include switches and transformers as entities
+    
+    Returns:
+        Dict mapping entity_id to set of bus_ids: {entity_id: {bus1, bus2, ...}}
+    """
+    entity_to_buses = {}
+    
+    if not line.empty:
+        for _, row in line.iterrows():
+            entity_id = ("line", row["ID"])
+            buses = set()
+            if pd.notna(row.get("Bus1")):
+                buses.add(row["Bus1"])
+            if pd.notna(row.get("Bus2")):
+                buses.add(row["Bus2"])
+            if buses:
+                entity_to_buses[entity_id] = buses
+    
+    if use_switches_and_transformers and switch is not None and not switch.empty:
+        closed_switches = switch[(switch["State1"] == 1) & (switch["State2"] == 1)]
+        for _, row in closed_switches.iterrows():
+            entity_id = ("switch", row["ID"])
+            buses = set()
+            if pd.notna(row.get("Bus1")):
+                buses.add(row["Bus1"])
+            if pd.notna(row.get("Bus2")):
+                buses.add(row["Bus2"])
+            if buses:
+                entity_to_buses[entity_id] = buses
+    
+    if use_switches_and_transformers and transformer is not None and not transformer.empty:
+        for _, row in transformer.iterrows():
+            entity_id = ("transformer", row["ID"])
+            buses = set()
+            if pd.notna(row.get("Bus1")):
+                buses.add(row["Bus1"])
+            if pd.notna(row.get("Bus2")):
+                buses.add(row["Bus2"])
+            if buses:
+                entity_to_buses[entity_id] = buses
+    
+    if cgp is not None and not cgp.empty:
+        for _, row in cgp.iterrows():
+            bus_id = row.get("BusId")
+            if pd.notna(bus_id):
+                entity_id = ("cgp", bus_id)
+                entity_to_buses[entity_id] = {bus_id}
+    
+    return entity_to_buses
+
+
+def propagate_hc_iterative(entity_bus_map: dict, initial_bus_hc: dict) -> dict:
+    """
+    Iteratively propagate HC from buses connected to CGPs to all other buses through entities.
+    
+    Algorithm:
+    1. Start with buses that have HC from CGPs as "rank 1"
+    2. Iteratively propagate HC through entities:
+       - For each entity, if some buses have a rank, assign rank+1 to other buses
+       - Calculate HC using PROPER_LINE_DYNAMIC_COLOR_OPTION on buses that already have HC
+    3. Continue until all buses have HC
+    
+    Args:
+        entity_bus_map: Dict mapping entity_id to set of bus_ids
+        initial_bus_hc: Dict mapping bus_id to HC (from CGP-connected buses)
+    
+    Returns:
+        Dict mapping bus_id to (HC, rank): {bus_id: (hc_value, rank_number)}
+    """
+    bus_hc_rank = {}
+    bus_to_entity = {}
+    
+    def normalize_bus_id(bid):
+        """Convert bus ID to int, handling float and NaN values."""
+        if pd.isna(bid):
+            return None
+        try:
+            return int(float(bid))
+        except (ValueError, TypeError):
+            return None
+    
+    for entity_id, buses in entity_bus_map.items():
+        for bus_id in buses:
+            norm_id = normalize_bus_id(bus_id)
+            if norm_id is None:
+                continue
+            if norm_id not in bus_to_entity:
+                bus_to_entity[norm_id] = []
+            bus_to_entity[norm_id].append(entity_id)
+    
+    for bus_id, hc in initial_bus_hc.items():
+        if pd.notna(hc):
+            norm_id = normalize_bus_id(bus_id)
+            if norm_id is not None:
+                bus_hc_rank[norm_id] = (float(hc), 1)
+    
+    max_iterations = 1000
+    for iteration in range(max_iterations):
+        made_progress = False
+        
+        for entity_id, buses in entity_bus_map.items():
+            normalized_buses = {normalize_bus_id(b) for b in buses if normalize_bus_id(b) is not None}
+            buses_with_hc = {b: hr for b, hr in bus_hc_rank.items() if b in normalized_buses}
+            buses_without_hc = normalized_buses - set(bus_hc_rank.keys())
+            
+            # Also consider buses that could be REASSIGNED (from lower rank path)
+            buses_possible_reassign = set()
+            for b in normalized_buses:
+                if b in bus_hc_rank:
+                    other_buses_with_hc = {bb: hr for bb, hr in buses_with_hc.items() if bb != b}
+                    if other_buses_with_hc:
+                        other_min_rank = min(hr[1] for hr in other_buses_with_hc.values())
+                        current_rank = bus_hc_rank[b][1]
+                        if other_min_rank < current_rank - 1:
+                            buses_possible_reassign.add(b)
+            
+            all_buses_to_consider = buses_without_hc | buses_possible_reassign
+            
+            if not buses_with_hc or not all_buses_to_consider:
+                continue
+            
+            min_rank = min(hr[1] for hr in buses_with_hc.values())
+            new_rank = min_rank + 1
+            hc_values = [hr[0] for hr in buses_with_hc.values()]
+            
+            if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
+                new_hc = min(hc_values)
+            else:
+                new_hc = sum(hc_values) / len(hc_values)
+            
+            for bus_id in buses_without_hc:
+                if bus_id not in bus_hc_rank:
+                    bus_hc_rank[bus_id] = (new_hc, new_rank)
+                    made_progress = True
+            
+            # Allow reassignment from lower rank
+            for bus_id in buses_possible_reassign:
+                current_hc, current_rank = bus_hc_rank[bus_id]
+                if new_rank < current_rank:
+                    bus_hc_rank[bus_id] = (new_hc, new_rank)
+                    made_progress = True
+        
+        if not made_progress:
+            break
+    
+    return bus_hc_rank
+
+
+def calculate_line_hc_from_propagated_buses(line: pd.DataFrame, bus_hc_rank_dict: dict) -> pd.DataFrame:
+    """
+    Calculate HC for each line based on all buses in the line using the propagated HC values.
+    
+    Args:
+        line: DataFrame with line data (must have ID, Bus1, Bus2 columns)
+        bus_hc_rank_dict: Dict mapping bus_id to (HC, rank)
+    
+    Returns:
+        DataFrame with columns [LineID, HC] mapping each line to its calculated HC
+    """
+    results = []
+    
+    if line.empty:
+        return pd.DataFrame(columns=["LineID", "HC"])
+    
+    for _, row in line.iterrows():
+        line_id = row["ID"]
+        hc_values = []
+        
+        bus1 = row.get("Bus1")
+        bus2 = row.get("Bus2")
+        
+        if pd.notna(bus1) and bus1 in bus_hc_rank_dict:
+            hc_values.append(bus_hc_rank_dict[bus1][0])
+        if pd.notna(bus2) and bus2 in bus_hc_rank_dict:
+            hc_values.append(bus_hc_rank_dict[bus2][0])
+        
+        if hc_values:
+            if PROPER_LINE_DYNAMIC_COLOR_OPTION == 2:
+                line_hc = min(hc_values)
+            else:
+                line_hc = sum(hc_values) / len(hc_values)
+        else:
+            line_hc = None
+        
+        results.append({"LineID": line_id, "HC": line_hc})
+    
+    return pd.DataFrame(results)
+
+
 def _find_window_pids_with_title(substring: str):
     """Return list of PIDs for visible top-level windows whose title contains substring (case-insensitive)."""
     user32 = ctypes.windll.user32
@@ -575,6 +844,7 @@ def main():
     all_buses = []
     all_switches = []
     all_transformers = []
+    all_cgps = []
 
     station_dirs = sorted([p for p in root.iterdir() if p.is_dir()])
 
@@ -619,11 +889,13 @@ def main():
             all_transformers.append(transformer)
             all_hc_data.append(dem[["BusId", "HC"]])
             all_buses.append(bus)
+            all_cgps.append(cgp)
         
-        if PLOT_PROPER_LINES and not PROPER_LINE_GROUP_CONNECTIVITY:
-            proper_seg = proper_line_segments(bus, line, db_path, dem[["BusId", "HC"]])
-            if not proper_seg.empty:
-                proper_seg_all.append(proper_seg)
+        if PLOT_PROPER_LINES and (not PROPER_LINE_GROUP_CONNECTIVITY or PROPER_LINE_GROUP_CONNECTIVITY_OPTION == 3):
+            if PROPER_LINE_GROUP_CONNECTIVITY_OPTION != 3:
+                proper_seg = proper_line_segments(bus, line, db_path, dem[["BusId", "HC"]])
+                if not proper_seg.empty:
+                    proper_seg_all.append(proper_seg)
 
     pts = pd.concat(pts_all, ignore_index=True).dropna(subset=["X", "Y", "HC"])
     # Don't concatenate here - wait until after group connectivity processing
@@ -631,7 +903,8 @@ def main():
     # Calculate line groups and group HC
     # Handle normal lines and proper lines independently to allow different settings
     need_line_grouping = PLOT_LINES and LINE_GROUP_CONNECTIVITY
-    need_proper_line_grouping = PLOT_PROPER_LINES and PROPER_LINE_GROUP_CONNECTIVITY
+    need_proper_line_grouping = PLOT_PROPER_LINES and PROPER_LINE_GROUP_CONNECTIVITY and PROPER_LINE_GROUP_CONNECTIVITY_OPTION != 3
+    need_proper_line_iterative = PLOT_PROPER_LINES and PROPER_LINE_GROUP_CONNECTIVITY and PROPER_LINE_GROUP_CONNECTIVITY_OPTION == 3
     
     # Determine if we need to calculate groups and with what settings
     lines_for_grouping = []
@@ -655,6 +928,9 @@ def main():
         lines_for_grouping = all_lines
         use_switches_and_transformers = LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS
     elif need_proper_line_grouping:
+        lines_for_grouping = all_lines
+        use_switches_and_transformers = PROPER_LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS
+    elif need_proper_line_iterative:
         lines_for_grouping = all_lines
         use_switches_and_transformers = PROPER_LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS
     
@@ -700,8 +976,8 @@ def main():
                 if not seg.empty:
                     seg_all.append(seg)
         
-        # Process proper lines with group connectivity if enabled
-        if PLOT_PROPER_LINES and PROPER_LINE_GROUP_CONNECTIVITY:
+        # Process proper lines with group connectivity if enabled (options 1 and 2)
+        if PLOT_PROPER_LINES and PROPER_LINE_GROUP_CONNECTIVITY and PROPER_LINE_GROUP_CONNECTIVITY_OPTION != 3:
             proper_seg_all.clear()  # Clear first pass results
             for st_dir in station_dirs:
                 db_path = st_dir / "net.db"
@@ -724,6 +1000,50 @@ def main():
                 
                 bus, cgp, line, switch, transformer = read_db_tables(db_path)
                 proper_seg = proper_line_segments(bus, line, db_path, dem[["BusId", "HC"]], group_hc_df, line_group_df, PROPER_LINE_GROUP_CONNECTIVITY_OPTION)
+                if not proper_seg.empty:
+                    proper_seg_all.append(proper_seg)
+        
+        # Process proper lines with iterative HC propagation (option 3)
+        if need_proper_line_iterative:
+            all_lines_df = pd.concat(all_lines, ignore_index=True)
+            all_hc_df = pd.concat(all_hc_data, ignore_index=True).dropna(subset=["BusId", "HC"])
+            all_buses_df = pd.concat(all_buses, ignore_index=True)
+            all_switches_df = pd.concat(all_switches, ignore_index=True) if all_switches else pd.DataFrame()
+            all_transformers_df = pd.concat(all_transformers, ignore_index=True) if all_transformers else pd.DataFrame()
+            all_cgps_df = pd.concat(all_cgps, ignore_index=True) if all_cgps else pd.DataFrame()
+            
+            use_swt = PROPER_LINE_GROUP_CONNECTIVITY_WITH_SWITCHES_AND_TRANSFORMERS
+            
+            entity_bus_map = build_entity_bus_mapping(
+                all_lines_df, all_switches_df, all_transformers_df, all_cgps_df, use_swt
+            )
+            
+            initial_bus_hc = dict(zip(all_hc_df["BusId"], all_hc_df["HC"]))
+            
+            propagated_bus_hc = propagate_hc_iterative(entity_bus_map, initial_bus_hc)
+            
+            proper_seg_all.clear()
+            for st_dir in station_dirs:
+                db_path = st_dir / "net.db"
+                if not db_path.exists():
+                    continue
+                
+                cap_path = st_dir / "out_6_3" / "CapMap_chk.txt"
+                if not cap_path.exists():
+                    continue
+                
+                cap = read_capmap(cap_path)
+                dem = cap[(cap["F"] >= 0) & (cap["F"] <= 23)].copy()
+                dem["hour"] = dem["F"].astype(int)
+                dem = dem[dem["hour"] == CRITICAL_HOUR_DEMAND].copy()
+                
+                for c in ["PA", "PB", "PC"]:
+                    dem[c] = pd.to_numeric(dem[c], errors="coerce")
+                
+                dem["HC"] = dem[["PA", "PB", "PC"]].min(axis=1)
+                
+                bus, cgp, line, switch, transformer = read_db_tables(db_path)
+                proper_seg = proper_line_segments(bus, line, db_path, dem[["BusId", "HC"]], None, None, PROPER_LINE_GROUP_CONNECTIVITY_OPTION, propagated_bus_hc)
                 if not proper_seg.empty:
                     proper_seg_all.append(proper_seg)
         
@@ -754,7 +1074,7 @@ def main():
                     normalized = (r["VisualizedHC"] - hc_min) / (hc_max - hc_min)
                 else:
                     normalized = 0.5
-                color = plt.cm.get_cmap(CIRCLE_CMAP)(normalized)
+                color = plt.colormaps.get_cmap(CIRCLE_CMAP)(normalized)
             else:
                 color = LINE_COLOR
             ax.plot(
@@ -772,7 +1092,7 @@ def main():
                     normalized = (r["VisualizedHC"] - hc_min) / (hc_max - hc_min)
                 else:
                     normalized = 0.5
-                color = plt.cm.get_cmap(CIRCLE_CMAP)(normalized)
+                color = plt.colormaps.get_cmap(CIRCLE_CMAP)(normalized)
             else:
                 color = PROPER_LINE_COLOR
             ax.plot(
