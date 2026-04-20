@@ -42,7 +42,7 @@ LINE_GROUP_CONNECTIVITY_OPTION = 1  # 1=use group HC for all lines, 2=override w
 PLOT_PROPER_LINES = True  # Toggle proper segment-based lines on/off
 
 PROPER_LINE_WIDTH = 0.6   # Width of proper lines
-PROPER_LINE_ALPHA = 0.9   # Transparency of proper lines
+PROPER_LINE_ALPHA = 0.5   # Transparency of proper lines
 PROPER_LINE_COLOR = "blue"  # Color of proper lines (blue to distinguish from black direct lines)
 PROPER_LINE_DYNAMIC_COLOR = True  # If True, color lines by the HC of connected buses (overrides PROPER_LINE_COLOR)
 PROPER_LINE_DYNAMIC_COLOR_OPTION = 1  # 1=use average HC, 2=use minimum HC
@@ -64,8 +64,24 @@ PLOT_CIRCLE_EDGE = True  # Toggle circle border/outline on/off. When True, circl
 CIRCLE_EDGE_COLOR = "black"  # Color of the circle outline. Use any matplotlib color name (e.g., "black", "white", "red") or hex code (e.g., "#000000").
 CIRCLE_EDGE_WIDTH = 0.5  # Thickness of the circle outline in points. Range: 0 (no outline) to ~2+ (thick outline). Typical range: 0.1-1.0.
 
+# ---------- Square Settings ----------
+PLOT_SQUARES = True  # Toggle square points on/off (master toggle)
+
+PLOT_SQUARE_FILL = True  # Toggle square fill color on/off
+SQUARE_SIZE = 5  # Size of squares in points. Larger values make squares more visible. Typical range: 5-20.
+SQUARE_COLOR = "blue"  # Color of square fill. Use any matplotlib color name (e.g., "blue", "red") or hex code.
+SQUARE_ALPHA = 1.0  # Transparency of square fill. Range: 0 (invisible) to 1 (fully opaque).
+
+PLOT_SQUARE_EDGE = True  # Toggle square border/outline on/off
+SQUARE_EDGE_COLOR = "black"  # Color of the square outline.
+SQUARE_EDGE_WIDTH = 0.5  # Thickness of the square outline in points.
+
 # ---------- Background Settings ----------
-BACKGROUND_COLOR = "lightgray"  # Background color of the plot. Use any matplotlib color name or hex code. "lightgray" provides good contrast for both dark and light elements.
+BACKGROUND_COLOR = "#FFFFFF"  # Background color of the plot. Use any matplotlib color name or hex code. "lightgray" provides good contrast for both dark and light elements.
+# white: #FFFFFF
+# cream/off-white: #FEF0F0
+# light blue-gray: #F0F4F8
+
 
 # ---------- Output Settings ----------
 SAVE_HIGH_RES = True   # Save additional high-resolution PNG version
@@ -98,6 +114,20 @@ def cgp_coordinates(bus: pd.DataFrame, cgp: pd.DataFrame) -> pd.DataFrame:
     if "Bus" in cgp.columns and "BusId" not in cgp.columns:
         cgp = cgp.rename(columns={"Bus": "BusId"})
     out = cgp.merge(bus[["BusId", "X", "Y"]], on="BusId", how="left")
+    out = out.drop_duplicates(subset=["BusId"])
+    return out[["BusId", "X", "Y"]]
+
+
+def winding_coordinates(bus: pd.DataFrame, db_path: Path) -> pd.DataFrame:
+    con = sqlite3.connect(db_path)
+    winding = pd.read_sql_query("SELECT * FROM Winding WHERE Cfg = 6;", con)
+    con.close()
+    if winding.empty:
+        return pd.DataFrame(columns=["BusId", "X", "Y"])
+    bus = bus.rename(columns={"ID": "BusId"})
+    if "Bus" in winding.columns:
+        winding = winding.rename(columns={"Bus": "BusId"})
+    out = winding.merge(bus[["BusId", "X", "Y"]], on="BusId", how="left")
     out = out.drop_duplicates(subset=["BusId"])
     return out[["BusId", "X", "Y"]]
 
@@ -837,6 +867,7 @@ def main():
         print("[INFO] File closing only implemented for Windows")
 
     pts_all = []
+    square_pts_all = []
     seg_all = []
     proper_seg_all = []
     all_lines = []
@@ -870,7 +901,12 @@ def main():
 
         dem = dem.merge(cgp_xy, on="BusId", how="left")
         pts_all.append(dem[["X", "Y", "HC"]])
-        
+
+        if PLOT_SQUARES:
+            winding_xy = winding_coordinates(bus, db_path)
+            if not winding_xy.empty:
+                square_pts_all.append(winding_xy[["X", "Y"]])
+
         if PLOT_LINES:
             seg = line_segments(bus, line, dem[["BusId", "HC"]])
             if not seg.empty:
@@ -1124,6 +1160,22 @@ def main():
         if PLOT_CIRCLE_FILL:
             cb = plt.colorbar(sc, ax=ax, fraction=0.035, pad=0.02)
             cb.set_label("Demand hosting capacity [kW] (min across phases)")
+
+    if PLOT_SQUARES:
+        square_pts = pd.concat(square_pts_all, ignore_index=True).dropna(subset=["X", "Y"])
+        if not square_pts.empty:
+            sq_edge_color = SQUARE_EDGE_COLOR if PLOT_SQUARE_EDGE else "none"
+            sq_edge_width = SQUARE_EDGE_WIDTH if PLOT_SQUARE_EDGE else 0
+            ax.scatter(
+                square_pts["X"],
+                square_pts["Y"],
+                c=SQUARE_COLOR if PLOT_SQUARE_FILL else "lightgray",
+                s=SQUARE_SIZE,
+                alpha=SQUARE_ALPHA if PLOT_SQUARE_FILL else 0.3,
+                marker="s",
+                edgecolors=sq_edge_color,
+                linewidth=sq_edge_width
+            )
 
     ax.set_title(
         f"Demand nodal hosting capacity at critical hour (t={CRITICAL_HOUR_DEMAND:02d})"
